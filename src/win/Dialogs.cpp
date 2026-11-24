@@ -279,7 +279,8 @@ protected:
         titleKb_ = MakeLabel(hwnd_, L"키보드", 150, 16, 52, 22);
         SendMessageW(titleKb_, WM_SETFONT, reinterpret_cast<WPARAM>(ui::fontBold), TRUE);
         MakeShortcutRows();
-        btnResetSc_ = MakeControl(hwnd_, L"BUTTON", L"기본값으로 복원", WS_TABSTOP | BS_OWNERDRAW, 150, 310, 130, 26, kIdBtnResetShortcut);
+        int resetY = 66 + static_cast<int>(workingShortcuts_.size()) * 28 + 6;
+        btnResetSc_ = MakeControl(hwnd_, L"BUTTON", L"기본값으로 복원", WS_TABSTOP | BS_OWNERDRAW, 150, resetY, 130, 26, kIdBtnResetShortcut);
         MakeControl(hwnd_, L"BUTTON", L"확인", WS_TABSTOP | BS_OWNERDRAW, 448, 382, 75, 26, IDOK);
         MakeControl(hwnd_, L"BUTTON", L"취소", WS_TABSTOP | BS_OWNERDRAW, 531, 382, 75, 26, IDCANCEL);
 

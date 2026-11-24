@@ -442,7 +442,11 @@ void PaneView::Click(const Hit& hit) {
             break;
         }
         case HitKind::Crumb:
-            if (hit.index >= 0 && hit.index < static_cast<int>(crumbs_.size())) NavigateSelected(crumbs_[static_cast<size_t>(hit.index)].target);
+            if (hit.index >= 0 && hit.index < static_cast<int>(crumbs_.size()) && tab) {
+                const auto& target = crumbs_[static_cast<size_t>(hit.index)].target;
+                if (EqualsNoCase(target, path::Parent(tab->Path()))) Up();
+                else NavigateSelected(target);
+            }
             break;
         default: break;
     }

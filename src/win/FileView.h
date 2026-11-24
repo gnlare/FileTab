@@ -17,6 +17,7 @@ public:
         virtual void FvOpen() = 0;                       // 더블 클릭
         virtual void FvContextMenu(POINT screen) = 0;
         virtual void FvSortRequested(SortKey key) = 0;
+        virtual void FvDropFiles(const std::vector<std::wstring>& paths, const std::wstring& targetDir, bool isMove) = 0;
     };
 
     static bool RegisterWindowClass(HINSTANCE instance);
@@ -25,6 +26,8 @@ public:
 
     HWND hwnd() const { return hwnd_; }
 
+    std::shared_ptr<FolderTab> tab() const { return tab_; }
+    void GetViewState(FolderViewState& out) const;
     void SetTab(std::shared_ptr<FolderTab> tab);          // 표시할 탭을 바꾼다(이전 탭의 선택·스크롤은 탭에 저장)
     void OnTabChanged(unsigned what);                     // 현재 탭의 변경 알림(TabChange 비트)
     void SaveStateToTab();
@@ -36,11 +39,14 @@ public:
     std::vector<std::wstring> SelectedPaths() const;
     void SelectOnlyByName(const std::wstring& name);      // 선택하고 화면에 보이게 한다
     bool HasFocus() const;
+    bool HandleFindKey(WPARAM key);
     void Focus();
     void RepaintNow();
     std::wstring FullPath(const FileEntry& e) const;
+    void HandleDroppedFiles(const std::vector<std::wstring>& paths, int targetItemIdx, DWORD keyState);
 
 private:
+    friend class FileDropTarget;
     FileView() = default;
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
@@ -84,6 +90,11 @@ private:
     void OnLButtonUp(int x, int y);
     void OnKeyDown(WPARAM key);
     void OnChar(wchar_t ch);
+    void UpdateFind();
+    void EndFind(bool restore);
+    void PaintFindBar(HDC dc);
+    void DrawFindName(HDC dc, int index, const std::wstring& name, RECT rc, UINT flags);
+    bool Finding() const { return findActive_; }
     void OnWheel(int delta);
     void UpdateTooltipText(NMTTDISPINFOW* info);
 
@@ -121,13 +132,20 @@ private:
     std::wstring tipText_;
 
     std::wstring typeBuf_;
-    DWORD typeTick_ = 0;
+    bool findActive_ = false;
+    DWORD firstCharTick_ = 0;
+    std::vector<int> findMatches_;
+    std::vector<char> findSavedSelection_;
+    int findSavedFocus_ = -1, findSavedAnchor_ = -1, findSavedScroll_ = 0;
+    int findSavedCount_ = 0;
+    int fullH_ = 0;
 
     // 그리기 자원
     HDC memDc_ = nullptr, scratchDc_ = nullptr;
     HBITMAP backBmp_ = nullptr, backOld_ = nullptr;
     int backW_ = 0, backH_ = 0;
     EpochPtr epoch_ = std::make_shared<std::atomic<uint64_t>>(0);
+    IDropTarget* dropTarget_ = nullptr;
 };
 
 }  // namespace ft

@@ -1,2 +1,7 @@
 #pragma once
 #define IDI_APPICON 101
+#define IDB_SEARCH_LIGHT 102
+#define IDB_SEARCH_DARK 103
+#define IDB_FILTER_LIGHT 104
+#define IDB_FILTER_DARK 105
+

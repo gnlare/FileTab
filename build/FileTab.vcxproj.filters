@@ -1,0 +1,57 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\Dialogs.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\FileView.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\FolderTab.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\FsServices.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\Images.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\MainWindow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\PaneView.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\PaneViewUi.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\SearchBar.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\SearchIcons.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\SettingsService.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\Win.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\src\win\main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="C:\Dev\3_Tools\FileTab\FileTab-cpp\resources\FileTab.rc">
+      <Filter>Source Files</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{1C792068-5706-3CB9-A411-BFF2621D23A7}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

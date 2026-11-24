@@ -6,6 +6,7 @@
 
 #include "../src/core/FileEntry.h"
 #include "../src/core/GridNavigation.h"
+#include "../src/core/QuickFind.h"
 #include "../src/core/Json.h"
 #include "../src/core/LruCache.h"
 #include "../src/core/NavigationHistory.h"
@@ -47,6 +48,28 @@ static void TestHistory() {
     CHECK(!h.Forward() && *h.Back() == L"B", "New navigation discards forward branch");
     h.Visit(L"d");
     CHECK(*h.Back() == L"B", "Duplicate visits do not grow history");
+
+    // Test view state persistence across navigation
+    h.SaveCurrentState({120, {L"file1", L"file2"}, L"file1"});
+    CHECK(h.CurrentState() != nullptr && h.CurrentState()->scrollY == 120, "State saved on current entry");
+    h.GoBack(L"B");
+    h.SaveCurrentState({50, {L"dirB"}, L"dirB"});
+    h.GoForward(L"D");
+    CHECK(h.CurrentState() != nullptr && h.CurrentState()->scrollY == 120, "Forward restores entry state");
+    CHECK(h.CurrentState()->selection.size() == 2 && h.CurrentState()->focus == L"file1", "Selection preserved");
+    h.GoBack(L"B");
+    CHECK(h.CurrentState() != nullptr && h.CurrentState()->scrollY == 50 && h.CurrentState()->focus == L"dirB", "Back restores entry state");
+
+    // Test search state in history
+    TabSearchState s1;
+    s1.active = true;
+    s1.query = L"needle";
+    h.Visit(L"B", s1);
+    CHECK(h.CurrentSearch() != nullptr && h.CurrentSearch()->active && h.CurrentSearch()->query == L"needle", "Search state visited");
+    h.GoBack(L"B");
+    CHECK(h.CurrentSearch() != nullptr && !h.CurrentSearch()->active, "Back restores non-search state");
+    h.GoForward(L"B");
+    CHECK(h.CurrentSearch() != nullptr && h.CurrentSearch()->active && h.CurrentSearch()->query == L"needle", "Forward restores search state");
 }
 
 static void TestPaths() {
@@ -224,14 +247,16 @@ static void TestJsonAndSettings() {
     CHECK(GridPageTarget(23, 5, 21, 4, true) == 21, "Page Down at last row stays in column");
     CHECK(GridPageTarget(3, 5, 1, 4, false) == 1, "Single row preserves column");
     CHECK(GridPageTarget(0, 5, -1, 4, true) == -1, "Empty grid");
-    CHECK(DefaultShortcuts().size() == 8, "Only configurable shortcut rows remain");
+    CHECK(DefaultShortcuts().size() == 9, "Only configurable shortcut rows remain");
     CHECK(IsFixedShortcut(L"Control+C") && IsFixedShortcut(L"VK116") && IsFixedShortcut(L"Shift+Delete"), "Reserved key aliases");
     CHECK(!IsFixedShortcut(L"Ctrl+Shift+C"), "Unreserved combination remains configurable");
     auto legacyFixed = ParseSettings(R"({"Shortcuts":[{"Id":"refresh","Key":"F9"},{"Id":"parent","Key":"Ctrl+C","Key2":"Backspace"}]})");
-    CHECK(legacyFixed.shortcuts.size() == 8 && parent(legacyFixed).shortcut.empty() && parent(legacyFixed).shortcut2 == L"Backspace", "Legacy fixed overrides ignored and conflicts cleared");
+    CHECK(legacyFixed.shortcuts.size() == 9 && parent(legacyFixed).shortcut.empty() && parent(legacyFixed).shortcut2 == L"Backspace", "Legacy fixed overrides ignored and conflicts cleared");
 
     // MatchShortcut checks
     CHECK(MatchShortcut(L"F6", 0x75, false, false, false), "Match F6");
+    CHECK(MatchShortcut(L"F4", 0x73, false, false, false), "Match F4");
+    CHECK(MatchShortcut(L"Ctrl+F", 'F', true, false, false), "Match Ctrl+F");
     CHECK(MatchShortcut(L"Ctrl+T", 'T', true, false, false), "Match Ctrl+T");
     CHECK(!MatchShortcut(L"Ctrl+T", 'T', false, false, false), "Reject missing Ctrl");
     CHECK(MatchShortcut(L"Shift+Del", 0x2E, false, false, true), "Match Shift+Del");
@@ -251,7 +276,63 @@ static void TestLru() {
     CHECK(cache.Count() == 1 && cache.Contains(9), "LRU keeps at least the newest entry");
 }
 
+static void TestQuickFind() {
+    std::vector<std::wstring> names{L"ab-first", L"other", L"xxABxx", L"AB-next", L"ab-last"};
+    auto nameAt = [&](int i) -> const std::wstring& { return names[i]; };
+    CHECK(FindContains(L"xxABxx", L"ab"), "Find contains ignores case");
+    CHECK(!FindContains(L"abc", L"ac"), "Find requires consecutive characters");
+    CHECK(!FindContains(L"abc", L""), "Empty query does not match");
+    CHECK(FindContains(L"보고서12", L"12"), "Find numeric query");
+    CHECK(FindPrefixBelow(5, 0, L"ab", nameAt) == 3, "Find prefix below selection skips substring");
+    CHECK(FindPrefixBelow(5, -1, L"ab", nameAt) == 0, "Find starts at top without selection");
+    CHECK(FindPrefixBelow(5, 4, L"ab", nameAt) == -1, "Find does not wrap initial prefix search");
+    CHECK(FindPrefixBelow(0, -1, L"ab", nameAt) == -1, "Find handles empty list");
+    const std::vector<int> matches{0, 2, 3, 4};
+    CHECK(FindNextMatch(matches, 0, false) == 2, "Tab includes substring matches");
+    CHECK(FindNextMatch(matches, 4, false) == 0, "Tab wraps forward");
+    CHECK(FindNextMatch(matches, 0, true) == 4, "Shift Tab wraps backward");
+    CHECK(FindNextMatch(matches, 3, true) == 2, "Shift Tab moves backward");
+    CHECK(FindNextMatch({}, 0, false) == -1, "Tab handles no results");
+    CHECK(FindSingleKey(5, 0, L"a", nameAt) == 3, "Single key selects next prefix");
+    CHECK(FindSingleKey(5, 4, L"a", nameAt) == 0, "Single key wraps");
+    CHECK(FindSingleKey(5, 0, L"z", nameAt) == -1, "Single key no match");
+    CHECK(FindFirstMatch(matches) == 0, "Home selects first match");
+    CHECK(FindFirstMatch({}) == -1, "Home no match");
+    CHECK(FindClosestBelow(matches, -1) == 0, "Find closest below without selection");
+    CHECK(FindClosestBelow(matches, 0) == 0, "Find closest below matching selection");
+    CHECK(FindClosestBelow(matches, 1) == 2, "Find closest below non-matching selection");
+    CHECK(FindClosestBelow(matches, 3) == 3, "Find closest below matching middle");
+    CHECK(FindClosestBelow(matches, 4) == 4, "Find closest below matching last");
+    CHECK(FindClosestBelow(matches, 5) == 0, "Find closest below wraps around");
+    CHECK(FindClosestBelow({}, 0) == -1, "Find closest below empty matches");
+    const auto ranges = FindRanges(L"xxABxxab.txt", L"ab");
+    CHECK(ranges.size() == 2 && ranges[0].first == 2 && ranges[0].second == 2 && ranges[1].first == 6, "Highlight only matching substrings");
+    CHECK(FindRanges(L"abc", L"").empty(), "Empty query no highlights");
+    CHECK(FindRanges(L"abc", L"z").empty(), "No matching ranges");
+
+    // Wildcard matching tests
+    CHECK(FindMatchesName(L"document.txt", L"*.txt"), "Wildcard matches extension");
+    CHECK(FindMatchesName(L"PHOTO.PNG", L"*.png"), "Wildcard extension case insensitive");
+    CHECK(!FindMatchesName(L"document.docx", L"*.txt"), "Wildcard mismatch extension");
+    CHECK(FindMatchesName(L"report_2026.pdf", L"report*"), "Wildcard prefix match");
+    CHECK(FindMatchesName(L"my_sample_file.cpp", L"*sample*"), "Wildcard contains match");
+    CHECK(FindMatchesName(L"test.c", L"test.?"), "Wildcard single char match");
+    CHECK(!FindMatchesName(L"test.cpp", L"test.?"), "Wildcard single char mismatch");
+    CHECK(FindMatchesName(L"abc.txt", L"abc"), "Non-wildcard substring match");
+
+    // Global search options test
+    GlobalSearchOptions().type = SearchType::Images;
+    GlobalSearchOptions().searchSubfolders = true;
+    TabSearchState tabState;
+    tabState.query = L"*.jpg";
+    tabState.ApplyGlobalOptions();
+    CHECK(tabState.type == SearchType::Images && tabState.searchSubfolders && tabState.query == L"*.jpg",
+          "Global search options applied to tab state");
+    GlobalSearchOptions() = {};
+}
+
 int main() {
+    TestQuickFind();
     TestHistory();
     TestPaths();
     TestText();

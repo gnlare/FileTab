@@ -1,5 +1,8 @@
 // 탭 하나의 상태: 현재 경로, 이력, 보기 모드, 정렬, 항목 목록, 비동기 폴더 읽기.
 #pragma once
+#include <map>
+#include <optional>
+
 #include "Win.h"
 
 namespace ft {
@@ -12,6 +15,9 @@ struct DirResult {
     uint64_t seq = 0;
     int direction = 0;
     std::wstring path;
+    std::wstring childName;
+    TabSearchState search;
+    bool isSearch = false;
     bool ok = false;
     std::wstring error;
     std::vector<FileEntry> entries;
@@ -31,6 +37,7 @@ class FolderTab : public std::enable_shared_from_this<FolderTab> {
 public:
     using Done = std::function<void(bool)>;
     using Listener = std::function<void(FolderTab&, unsigned)>;
+    using StateProvider = std::function<void(FolderViewState& out)>;
 
     FolderTab(std::wstring path, ViewMode mode);
 
@@ -48,18 +55,39 @@ public:
     void Sort(SortKey key, bool descending);
 
     // 폴더를 읽어 성공하면 경로·이력·목록을 함께 바꾼다. 실패하면 기존 상태를 보존하고 done(false).
-    void Navigate(const std::wstring& path, Done done = nullptr) { Load(path, 0, std::move(done)); }
-    void Refresh(Done done = nullptr) { Load(path_, 2, std::move(done)); }
+    void Navigate(const std::wstring& path, Done done = nullptr);
+    void Refresh(Done done = nullptr);
     void Back(Done done = nullptr);
     void Forward(Done done = nullptr);
+    void Up(Done done = nullptr);
     void Dispose();
 
+    TabSearchState GetSearchState() const {
+        TabSearchState st = searchState_;
+        st.ApplyGlobalOptions();
+        return st;
+    }
+    bool IsSearchActive() const { return searchState_.active; }
+    void ExecuteSearch(const TabSearchState& state);
+    void CancelSearch();
+
     void SetListener(Listener l) { listener_ = std::move(l); }
+    void SetStateProvider(StateProvider p) { stateProvider_ = std::move(p); }
     void OnResult(DirResult& result);   // UI 스레드
 
     COLORREF Color() const { return color_; }
     void SetColor(COLORREF c) { color_ = (c == 0 ? CLR_INVALID : c); }
     bool HasColor() const { return color_ != CLR_INVALID && color_ != 0; }
+
+    bool HasPendingRestore() const { return pendingRestoreState_.has_value(); }
+    FolderViewState TakePendingRestore() {
+        auto s = *pendingRestoreState_;
+        pendingRestoreState_.reset();
+        return s;
+    }
+
+    void SaveViewState(const std::wstring& path, const FolderViewState& state);
+    bool GetViewState(const std::wstring& path, FolderViewState& out) const;
 
     // 탭을 떠났다가 돌아올 때 복원할 보기 상태
     std::vector<std::wstring> savedSelection;
@@ -67,11 +95,19 @@ public:
     int savedScroll = 0;
 
 private:
-    void Load(const std::wstring& input, int direction, Done done);
+    void Load(const std::wstring& input, int direction, Done done, const std::wstring& childName);
+    void Load(const std::wstring& input, int direction, Done done, const std::wstring& childName, const TabSearchState& search);
+    void Load(const std::wstring& input, int direction, Done done) { Load(input, direction, std::move(done), L"", {}); }
     void Finish(bool ok);
     void Notify(unsigned what) {
         if (listener_) listener_(*this, what);
     }
+
+    struct PathCompareNoCase {
+        bool operator()(std::wstring_view a, std::wstring_view b) const {
+            return CompareNoCase(a, b) < 0;
+        }
+    };
 
     std::wstring path_;
     ViewMode mode_;
@@ -86,6 +122,11 @@ private:
     std::shared_ptr<std::atomic<bool>> cancel_;
     Done pendingDone_;
     Listener listener_;
+    StateProvider stateProvider_;
+    std::map<std::wstring, FolderViewState, PathCompareNoCase> pathStates_;
+    std::optional<FolderViewState> pendingRestoreState_;
+    TabSearchState searchState_;
+    std::shared_ptr<const std::vector<FileEntry>> normalEntries_;
     COLORREF color_ = CLR_INVALID;
 };
 

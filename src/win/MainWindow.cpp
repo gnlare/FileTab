@@ -107,6 +107,16 @@ void MainWindow::CreateChildren() {
 
     left_.reset(PaneView::Create(hwnd_));
     right_.reset(PaneView::Create(hwnd_));
+    SearchBar::RegisterWindowClass(inst);
+    SearchBar::Callbacks scb;
+    scb.onSearch = [this](const TabSearchState& st) {
+        if (auto* p = ActivePane()) p->ExecuteSearch(st);
+    };
+    scb.onCancel = [this]() {
+        if (auto* p = ActivePane()) p->CancelSearch();
+    };
+    searchBar_.reset(SearchBar::Create(hwnd_, std::move(scb)));
+
     for (PaneView* pane : {left_.get(), right_.get()}) {
         pane->cb.activated = [this](PaneView* p) { SetActive(p); };
         pane->cb.action = [this](PaneView* p, FileAction a) { RunAction(p, a); };
@@ -115,6 +125,7 @@ void MainWindow::CreateChildren() {
             left_->OnBookmarksChanged();
             right_->OnBookmarksChanged();
         };
+        pane->cb.searchChanged = [this]() { SyncSearch(); };
     }
     ImageService::Get().Init(hwnd_);
 
@@ -137,6 +148,7 @@ void MainWindow::ApplyFonts() {
     if (titleLabel_) SendMessageW(titleLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(ui::fontBold), TRUE);
     for (HWND h : {settingsBtn_, dualBtn_, modeLabel_, modeCombo_})
         if (h) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(ui::font), TRUE);
+    if (searchBar_) searchBar_->ApplyDpi();
 }
 
 // ======================= 배치 =======================
@@ -185,6 +197,11 @@ void MainWindow::LayoutAll() {
     x += ui::S(36);
     MoveWindow(modeCombo_, x, centered(ui::S(26)), comboW, ui::S(26 + 150), TRUE);   // 높이에는 펼침 목록이 포함된다
 
+    int searchW = ui::S(260);
+    int searchH = ui::S(26);
+    int searchX = bar.right - ui::S(14) - searchW;
+    if (searchBar_) searchBar_->SetBounds(searchX, centered(searchH), searchW, searchH);
+
     RECT ar = PaneArea();
     if (!dual_) {
         MoveWindow(left_->hwnd(), ar.left, ar.top, ui::RcW(ar), ui::RcH(ar), TRUE);
@@ -216,6 +233,7 @@ void MainWindow::ApplyTheme() {
     whiteBrush_ = CreateSolidBrush(ui::kPanelBg);
     if (left_) left_->ApplyTheme();
     if (right_) right_->ApplyTheme();
+    if (searchBar_) searchBar_->ApplyTheme();
     SetWindowTheme(modeCombo_, ui::IsDarkMode() ? L"DarkMode_CFD" : L"Explorer", nullptr);
     COMBOBOXINFO ci{}; ci.cbSize = sizeof(ci);
     if (GetComboBoxInfo(modeCombo_, &ci)) {
@@ -231,6 +249,14 @@ void MainWindow::SetActive(PaneView* pane) {
     left_->SetActive(pane == left_.get());
     right_->SetActive(pane == right_.get());
     SyncMode();
+    SyncSearch();
+}
+
+void MainWindow::SyncSearch() {
+    if (!searchBar_) return;
+    if (auto* pane = ActivePane()) {
+        searchBar_->SetState(pane->GetCurrentSearchState());
+    }
 }
 
 void MainWindow::SyncMode() {
@@ -361,6 +387,7 @@ bool MainWindow::OnClose() {
 bool MainWindow::PreTranslate(const MSG& m) {
     if (m.message != WM_KEYDOWN && m.message != WM_SYSKEYDOWN) return false;
     if (!hwnd_ || (m.hwnd != hwnd_ && !IsChild(hwnd_, m.hwnd))) return false;   // 대화상자 등 다른 창의 키는 건드리지 않는다
+    if (m.message == WM_KEYDOWN && ((left_ && left_->HandleFindKey(m.wParam)) || (right_ && right_->HandleFindKey(m.wParam)))) return true;
     return HandleKey(m.wParam);
 }
 
@@ -393,8 +420,12 @@ bool MainWindow::HandleKey(WPARAM key) {
         pane->CloseSelectedTab();
         return true;
     }
-    if (matches("address", L"Ctrl+L")) {
+    if (matches("address", L"F4")) {
         pane->EditAddress();
+        return true;
+    }
+    if (matches("find", L"Ctrl+F")) {
+        if (searchBar_) searchBar_->Focus();
         return true;
     }
     

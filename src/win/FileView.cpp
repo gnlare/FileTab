@@ -1,5 +1,7 @@
 #include "FileView.h"
 #include "core/GridNavigation.h"
+#include "core/QuickFind.h"
+#include <cwctype>
 
 #include <algorithm>
 #include <cstdlib>
@@ -15,6 +17,81 @@ const wchar_t* kClassName = L"FileTabFileView";
 
 int ViewHeight(ViewMode mode, int clientH, int headerH) { return mode == ViewMode::Details ? std::max(0, clientH - headerH) : clientH; }
 }  // namespace
+
+class FileDropTarget final : public IDropTarget {
+public:
+    explicit FileDropTarget(FileView* view) : view_(view) {}
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == IID_IUnknown || riid == IID_IDropTarget) {
+            *ppv = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return ++refs_; }
+    STDMETHODIMP_(ULONG) Release() override {
+        ULONG r = --refs_;
+        if (r == 0) delete this;
+        return r;
+    }
+    STDMETHODIMP DragEnter(IDataObject* data, DWORD keyState, POINTL, DWORD* effect) override {
+        FORMATETC fmt{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        hasFiles_ = data && SUCCEEDED(data->QueryGetData(&fmt));
+        *effect = Effect(keyState);
+        return S_OK;
+    }
+    STDMETHODIMP DragOver(DWORD keyState, POINTL, DWORD* effect) override {
+        *effect = Effect(keyState);
+        return S_OK;
+    }
+    STDMETHODIMP DragLeave() override {
+        hasFiles_ = false;
+        return S_OK;
+    }
+    STDMETHODIMP Drop(IDataObject* data, DWORD keyState, POINTL pt, DWORD* effect) override {
+        *effect = DROPEFFECT_NONE;
+        if (!data || !hasFiles_ || !view_) return S_OK;
+        FORMATETC fmt{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        STGMEDIUM medium{};
+        if (SUCCEEDED(data->GetData(&fmt, &medium))) {
+            std::vector<std::wstring> paths;
+            HDROP drop = static_cast<HDROP>(GlobalLock(medium.hGlobal));
+            if (drop) {
+                UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+                for (UINT i = 0; i < count; ++i) {
+                    UINT len = DragQueryFileW(drop, i, nullptr, 0);
+                    std::wstring s(len + 1, L'\0');
+                    DragQueryFileW(drop, i, s.data(), len + 1);
+                    s.resize(len);
+                    paths.push_back(std::move(s));
+                }
+                GlobalUnlock(medium.hGlobal);
+            }
+            ReleaseStgMedium(&medium);
+
+            POINT p{pt.x, pt.y};
+            ScreenToClient(view_->hwnd(), &p);
+            int itemIdx = view_->HitTest(p.x, p.y);
+            view_->HandleDroppedFiles(paths, itemIdx, keyState);
+            *effect = (keyState & MK_SHIFT) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+        }
+        hasFiles_ = false;
+        return S_OK;
+    }
+
+private:
+    DWORD Effect(DWORD keyState) const {
+        if (!hasFiles_) return DROPEFFECT_NONE;
+        return (keyState & MK_SHIFT) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+    }
+
+    FileView* view_;
+    ULONG refs_ = 1;
+    bool hasFiles_ = false;
+};
 
 bool FileView::RegisterWindowClass(HINSTANCE instance) {
     WNDCLASSEXW wc{};
@@ -50,11 +127,18 @@ FileView* FileView::Create(HWND parent, Host* host) {
         SendMessageW(view->tip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
         SendMessageW(view->tip_, TTM_SETMAXTIPWIDTH, 0, 700);
     }
+    view->dropTarget_ = new FileDropTarget(view);
+    RegisterDragDrop(view->hwnd_, view->dropTarget_);
     view->ComputeLayout();
     return view;
 }
 
 FileView::~FileView() {
+    if (dropTarget_) {
+        RevokeDragDrop(hwnd_);
+        dropTarget_->Release();
+        dropTarget_ = nullptr;
+    }
     if (hwnd_) {
         SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
         DestroyWindow(hwnd_);
@@ -87,7 +171,8 @@ void FileView::ComputeLayout() {
     RECT rc{};
     GetClientRect(hwnd_, &rc);
     cw_ = rc.right;
-    ch_ = rc.bottom;
+    fullH_ = rc.bottom;
+    ch_ = std::max(0, fullH_ - (Finding() ? ui::S(36) : 0));
     m_.rowH = ui::S(30);
     m_.headerH = ui::S(26);
     m_.nameIcon = ui::S(20);
@@ -160,7 +245,7 @@ void FileView::EnsureVisible(int i) {
 
 int FileView::HitTest(int x, int y) const {
     int n = ItemCount();
-    if (n == 0 || x < 0 || y < 0) return -1;
+    if (n == 0 || x < 0 || y < 0 || y >= ch_) return -1;
     if (mode_ == ViewMode::Details) {
         if (y < m_.headerH || x >= cw_) return -1;
         int idx = (y - m_.headerH + scrollY_) / m_.rowH;
@@ -266,6 +351,23 @@ std::wstring FileView::FirstSelectedName() const {
 
 std::wstring FileView::FullPath(const FileEntry& e) const { return path::Combine(dir_, e.name); }
 
+void FileView::HandleDroppedFiles(const std::vector<std::wstring>& paths, int targetItemIdx, DWORD keyState) {
+    if (paths.empty() || !host_) return;
+    std::wstring targetDir;
+    if (targetItemIdx >= 0 && items_ && static_cast<size_t>(targetItemIdx) < items_->size()) {
+        const auto& entry = (*items_)[static_cast<size_t>(targetItemIdx)];
+        if (entry.IsDir()) {
+            targetDir = FullPath(entry);
+        }
+    }
+    if (targetDir.empty()) {
+        targetDir = tab_ ? tab_->Path() : L"";
+    }
+    if (targetDir.empty()) return;
+    bool isMove = (keyState & MK_SHIFT) != 0;
+    host_->FvDropFiles(paths, targetDir, isMove);
+}
+
 std::vector<std::wstring> FileView::SelectedPaths() const {
     std::vector<std::wstring> result;
     const size_t count = std::min(items_ ? items_->size() : 0, sel_.size());
@@ -309,6 +411,15 @@ void FileView::RepaintNow() { InvalidateRect(hwnd_, nullptr, FALSE); }
 
 // ======================= 탭 연결 =======================
 
+void FileView::GetViewState(FolderViewState& out) const {
+    out.scrollY = scrollY_;
+    out.selection.clear();
+    const size_t count = std::min(items_ ? items_->size() : 0, sel_.size());
+    for (size_t i = 0; i < count; ++i)
+        if (sel_[i]) out.selection.push_back((*items_)[i].name);
+    out.focus = (focus_ >= 0 && focus_ < ItemCount()) ? (*items_)[static_cast<size_t>(focus_)].name : std::wstring();
+}
+
 void FileView::SaveStateToTab() {
     if (!tab_) return;
     tab_->savedSelection.clear();
@@ -317,9 +428,16 @@ void FileView::SaveStateToTab() {
         if (sel_[i]) tab_->savedSelection.push_back((*items_)[i].name);
     tab_->savedFocus = (focus_ >= 0 && focus_ < ItemCount()) ? (*items_)[static_cast<size_t>(focus_)].name : std::wstring();
     tab_->savedScroll = scrollY_;
+
+    FolderViewState vs;
+    vs.scrollY = scrollY_;
+    vs.selection = tab_->savedSelection;
+    vs.focus = tab_->savedFocus;
+    tab_->SaveViewState(tab_->Path(), vs);
 }
 
 void FileView::SetTab(std::shared_ptr<FolderTab> tab) {
+    EndFind(true);
     if (tab_) SaveStateToTab();
     tab_ = std::move(tab);
     typeBuf_.clear();
@@ -345,6 +463,7 @@ void FileView::SetTab(std::shared_ptr<FolderTab> tab) {
 
 void FileView::OnTabChanged(unsigned what) {
     if (!tab_) return;
+    if (what & (kChangeEntries | kChangeMode | kChangeSort)) EndFind(false);
     if (what & kChangeMode) {
         mode_ = tab_->Mode();
         ComputeLayout();
@@ -368,11 +487,23 @@ void FileView::OnTabChanged(unsigned what) {
         const bool pathChanged = !EqualsNoCase(dir_, tab_->Path());
         items_ = tab_->Entries();
         dir_ = tab_->Path();
+        bool needScrollToFocus = false;
         if (pathChanged) {
-            sel_.assign(static_cast<size_t>(ItemCount()), 0);
-            selCount_ = 0;
-            anchor_ = focus_ = -1;
-            scrollY_ = 0;
+            if (tab_->HasPendingRestore()) {
+                auto restore = tab_->TakePendingRestore();
+                RestoreSelection(restore.selection, restore.focus);
+                if (restore.scrollY >= 0) {
+                    scrollY_ = restore.scrollY;
+                } else {
+                    scrollY_ = 0;
+                    needScrollToFocus = (focus_ >= 0);
+                }
+            } else {
+                sel_.assign(static_cast<size_t>(ItemCount()), 0);
+                selCount_ = 0;
+                anchor_ = focus_ = -1;
+                scrollY_ = 0;
+            }
         } else {
             RestoreSelection(names, focusName);
             // 같은 폴더: 맨 위에 보이던 항목을 따라가 스크롤 위치를 유지한다.
@@ -386,6 +517,7 @@ void FileView::OnTabChanged(unsigned what) {
         }
         typeBuf_.clear();
         ComputeLayout();
+        if (needScrollToFocus && focus_ >= 0) EnsureVisible(focus_);
         NotifySelection();
         return;
     }
@@ -400,25 +532,27 @@ void FileView::ApplyMetrics() { ComputeLayout(); }
 void FileView::Paint() {
     PAINTSTRUCT ps;
     HDC wdc = BeginPaint(hwnd_, &ps);
-    if (cw_ > 0 && ch_ > 0) {
+    if (cw_ > 0 && fullH_ > 0) {
         if (!memDc_) {
             memDc_ = CreateCompatibleDC(wdc);
             scratchDc_ = CreateCompatibleDC(wdc);
         }
-        if (!backBmp_ || backW_ != cw_ || backH_ != ch_) {
+        if (!backBmp_ || backW_ != cw_ || backH_ != fullH_) {
             if (backBmp_) {
                 SelectObject(memDc_, backOld_);
                 DeleteObject(backBmp_);
             }
-            backBmp_ = CreateCompatibleBitmap(wdc, cw_, ch_);
+            backBmp_ = CreateCompatibleBitmap(wdc, cw_, fullH_);
             backW_ = cw_;
-            backH_ = ch_;
+            backH_ = fullH_;
             backOld_ = static_cast<HBITMAP>(SelectObject(memDc_, backBmp_));
         }
         const uint64_t frame = epoch_->fetch_add(1) + 1;
-        RECT all{0, 0, cw_, ch_};
+        RECT all{0, 0, cw_, fullH_};
         ui::FillRectColor(memDc_, all, ui::kPanelBg);
         SetBkMode(memDc_, TRANSPARENT);
+        int clip = SaveDC(memDc_);
+        IntersectClipRect(memDc_, 0, 0, cw_, ch_);
         if (mode_ == ViewMode::Details) PaintDetails(memDc_, frame);
         else PaintTiles(memDc_, frame);
         if (MaxScroll() > 0) {
@@ -428,7 +562,9 @@ void FileView::Paint() {
             COLORREF thumbColor = draggingThumb_ ? ui::kText : (ui::IsDarkMode() ? RGB(0x60, 0x60, 0x65) : RGB(0xB8, 0xC0, 0xCC));
             ui::FillRectColor(memDc_, tr, thumbColor);
         }
-        BitBlt(wdc, 0, 0, cw_, ch_, memDc_, 0, 0, SRCCOPY);
+        RestoreDC(memDc_, clip);
+        if (Finding()) PaintFindBar(memDc_);
+        BitBlt(wdc, 0, 0, cw_, fullH_, memDc_, 0, 0, SRCCOPY);
     }
     EndPaint(hwnd_, &ps);
 }
@@ -481,7 +617,7 @@ void FileView::PaintDetails(HDC dc, uint64_t frame) {
             if (img) ImageService::Draw(dc, scratchDc_, *img, iconCell);
 
             RECT nameRc{iconCell.right + ui::S(8), y, nameW - ui::S(4), y + m_.rowH};
-            ui::DrawTextIn(dc, e.name, nameRc, textFlags, ui::kText);
+            DrawFindName(dc, i, e.name, nameRc, textFlags);
             if (!e.IsDir()) {
                 RECT sizeRc{nameW + ui::S(4), y, nameW + sizeW - ui::S(4), y + m_.rowH};
                 ui::DrawTextIn(dc, FormatSize(static_cast<int64_t>(e.size)), sizeRc, textFlags, ui::kText);
@@ -551,7 +687,7 @@ void FileView::PaintTiles(HDC dc, uint64_t frame) {
             RECT textRc{x0 + (m_.tileW - textW) / 2, top + m_.iconPx + gap, x0 + (m_.tileW + textW) / 2, top + m_.iconPx + gap + textH};
             // 이름이 영역에 들어가면 가운데, 넘치면 왼쪽 정렬로 말줄임(WPF 버전과 같은 규칙)
             UINT align = ui::TextWidth(dc, e.name) <= textW ? DT_CENTER : DT_LEFT;
-            ui::DrawTextIn(dc, e.name, textRc, align | DT_SINGLELINE | DT_END_ELLIPSIS, ui::kText);
+            DrawFindName(dc, i, e.name, textRc, align | DT_SINGLELINE | DT_END_ELLIPSIS);
 
             if (focused && i == focus_) {
                 RECT fr = tile;
@@ -567,6 +703,8 @@ void FileView::PaintTiles(HDC dc, uint64_t frame) {
 void FileView::OnLButtonDown(int x, int y, WPARAM keys) {
     SetFocus(hwnd_);
     if (host_) host_->FvActivate();
+    if (y >= ch_) return;
+    if (!Finding()) EndFind(false);
 
     if (MaxScroll() > 0) {
         RECT tr = ThumbRect();
@@ -690,6 +828,8 @@ void FileView::OnLButtonUp(int x, int y) {
 }
 
 void FileView::OnKeyDown(WPARAM key) {
+    if (HandleFindKey(key)) return;
+    if (!Finding() && !(key >= '0' && key <= '9') && !(key >= 'A' && key <= 'Z') && !(key >= VK_NUMPAD0 && key <= VK_NUMPAD9) && key != VK_SHIFT) EndFind(false);
     const int n = ItemCount();
     if (n == 0) return;
     const bool ctrl = GetKeyState(VK_CONTROL) < 0;
@@ -729,22 +869,192 @@ void FileView::OnKeyDown(WPARAM key) {
     if (target >= 0) MoveFocus(target, shift, ctrl);
 }
 
-void FileView::OnChar(wchar_t ch) {
-    if (ch < 32 || GetKeyState(VK_CONTROL) < 0) return;
-    const int n = ItemCount();
-    if (n == 0) return;
-    DWORD now = GetTickCount();
-    if (now - typeTick_ > 1000) typeBuf_.clear();
-    typeTick_ = now;
-    if (ch == L' ' && typeBuf_.empty()) return;
-    typeBuf_ += ch;
-    const int start = std::max(0, focus_) + (typeBuf_.size() == 1 ? 1 : 0);
-    for (int k = 0; k < n; ++k) {
-        int i = (start + k) % n;
-        if (StartsWithNoCase((*items_)[static_cast<size_t>(i)].name, typeBuf_)) {
-            MoveFocus(i, false, false);
-            return;
+void FileView::DrawFindName(HDC dc, int index, const std::wstring& name, RECT rc, UINT flags) {
+    if (ui::RcW(rc) <= 0 || ui::RcH(rc) <= 0) return;
+    const bool match = Finding() && std::binary_search(findMatches_.begin(), findMatches_.end(), index);
+    if (!match) {
+        ui::DrawTextIn(dc, name, rc, flags, ui::kText);
+        return;
+    }
+    // Ask DrawText for the actual ellipsized text, then highlight only visible matching characters.
+    const int saved = SaveDC(dc);
+    if (!saved) { ui::DrawTextIn(dc, name, rc, flags, ui::kText); return; }
+    IntersectClipRect(dc, rc.left, rc.top, rc.right, rc.bottom);
+    SelectObject(dc, ui::font);
+    std::vector<wchar_t> buffer(name.begin(), name.end());
+    buffer.resize(name.size() + 5, L'\0');
+    RECT actual = rc;
+    SetTextColor(dc, ui::kText);
+    SetBkMode(dc, TRANSPARENT);
+    DrawTextW(dc, buffer.data(), -1, &actual, flags | DT_NOPREFIX | DT_MODIFYSTRING);
+    const std::wstring displayed(buffer.data());
+    size_t visible = 0;
+    while (visible < name.size() && visible < displayed.size() && name[visible] == displayed[visible]) ++visible;
+    const int width = ui::TextWidth(dc, displayed);
+    const int x = rc.left + ((flags & DT_CENTER) ? std::max(0, (ui::RcW(rc) - width) / 2) : 0);
+    const int height = std::min(ui::RcH(rc), ui::TextHeight(dc));
+    const int y = rc.top + ((flags & DT_VCENTER) ? (ui::RcH(rc) - height) / 2 : 0);
+    for (const auto& range : FindRanges(name, typeBuf_)) {
+        if (range.first >= visible) break;
+        const size_t end = std::min(visible, range.first + range.second);
+        RECT mark{x + ui::TextWidth(dc, name.substr(0, range.first)), y,
+                  x + ui::TextWidth(dc, name.substr(0, end)), y + height};
+        const int clip = SaveDC(dc);
+        if (!clip) continue;
+        IntersectClipRect(dc, mark.left, mark.top, mark.right, mark.bottom);
+        ui::FillRectColor(dc, mark, ui::IsDarkMode() ? RGB(119, 87, 16) : RGB(255, 224, 102));
+        ui::DrawTextIn(dc, name, rc, flags, ui::IsDarkMode() ? RGB(255, 255, 255) : RGB(25, 25, 25));
+        RestoreDC(dc, clip);
+    }
+    RestoreDC(dc, saved);
+}
+
+void FileView::PaintFindBar(HDC dc) {
+    RECT bar{0, ch_, cw_, fullH_};
+    ui::FillRectColor(dc, bar, ui::kStripBg);
+    ui::FillRectColor(dc, RECT{0, ch_, cw_, ch_ + 1}, ui::kFieldBorder);
+    RECT label{ui::S(8), ch_, ui::S(50), fullH_};
+    ui::DrawTextIn(dc, L"찾기", label, DT_LEFT | DT_VCENTER | DT_SINGLELINE, ui::kText);
+    RECT field{ui::S(52), ch_ + ui::S(5), cw_ - ui::S(8), fullH_ - ui::S(5)};
+    if (ui::RcW(field) <= ui::S(12) || ui::RcH(field) <= 0) return;
+    ui::FillRectColor(dc, field, ui::kFieldBg);
+    ui::FrameRectColor(dc, field, ui::kFieldBorder);
+    RECT inner = field;
+    InflateRect(&inner, -ui::S(6), 0);
+
+    // 순서값 / 찾은 아이템 개수 계산
+    int order = 0;
+    const int total = static_cast<int>(findMatches_.size());
+    if (total > 0 && focus_ >= 0) {
+        for (size_t i = 0; i < findMatches_.size(); ++i) {
+            if (findMatches_[i] == focus_) {
+                order = static_cast<int>(i + 1);
+                break;
+            }
         }
+    }
+    const std::wstring countStr = std::to_wstring(order) + L" / " + std::to_wstring(total);
+
+    const int countW = ui::TextWidth(dc, countStr, ui::font);
+    RECT countRc = inner;
+    countRc.left = std::max(inner.left, inner.right - countW - ui::S(4));
+
+    RECT queryRc = inner;
+    queryRc.right = std::max(queryRc.left, countRc.left - ui::S(8));
+
+    ui::DrawTextIn(dc, typeBuf_, queryRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, ui::kText);
+
+    const COLORREF countColor = (total == 0 && !typeBuf_.empty()) ? RGB(220, 53, 69) : ui::kTextDim;
+    ui::DrawTextIn(dc, countStr, countRc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE, countColor, ui::font);
+}
+
+void FileView::UpdateFind() {
+    findMatches_.clear();
+    if (Finding() && !typeBuf_.empty()) {
+        for (int i = 0; i < ItemCount(); ++i)
+            if (FindContains((*items_)[static_cast<size_t>(i)].name, typeBuf_)) findMatches_.push_back(i);
+    }
+    ComputeLayout();
+    if (Finding() && !typeBuf_.empty()) {
+        const int refFocus = focus_ >= 0 ? focus_ : (findSavedFocus_ >= 0 ? findSavedFocus_ : -1);
+        const int target = FindClosestBelow(findMatches_, refFocus);
+        if (target >= 0) MoveFocus(target, false, false);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void FileView::EndFind(bool restore) {
+    if (typeBuf_.empty() && !Finding()) return;
+    bool wasFinding = Finding();
+    findActive_ = false;
+    typeBuf_.clear();
+    findMatches_.clear();
+    firstCharTick_ = 0;
+    if (restore && wasFinding && findSavedSelection_.size() == sel_.size()) {
+        sel_ = std::move(findSavedSelection_);
+        selCount_ = findSavedCount_;
+        focus_ = findSavedFocus_;
+        anchor_ = findSavedAnchor_;
+        scrollY_ = findSavedScroll_;
+    }
+    findSavedSelection_.clear();
+    if (wasFinding) {
+        ComputeLayout();
+        NotifySelection();
+    }
+}
+
+bool FileView::HandleFindKey(WPARAM key) {
+    if (!HasFocus() || (typeBuf_.empty() && !Finding())) return false;
+    if (GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0) {
+        if (!Finding()) EndFind(false);
+        return false;
+    }
+    if (key == VK_ESCAPE) { EndFind(true); return true; }
+    if (Finding() && key == VK_TAB) {
+        int target = FindNextMatch(findMatches_, focus_, GetKeyState(VK_SHIFT) < 0);
+        if (target >= 0) MoveFocus(target, false, false);
+        return true;
+    }
+    if (Finding() && key == VK_HOME) {
+        int target = FindFirstMatch(findMatches_);
+        if (target >= 0) MoveFocus(target, false, false);
+        return true;
+    }
+    if (Finding() && key == VK_END) {
+        if (!findMatches_.empty()) MoveFocus(findMatches_.back(), false, false);
+        return true;
+    }
+    if (Finding() && key == VK_BACK) {
+        if (!typeBuf_.empty()) {
+            typeBuf_.pop_back();
+            UpdateFind();
+        }
+        return true;
+    }
+    return false;
+}
+
+void FileView::OnChar(wchar_t ch) {
+    if (GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0 || !tab_) return;
+    if (!std::iswalnum(ch) && !(ch >= 0xAC00 && ch <= 0xD7A3) && !(ch >= 0x3131 && ch <= 0x318E) && !(ch >= 0x1100 && ch <= 0x11FF) && !(Finding() && ch >= 32 && ch != 127)) return;
+
+    DWORD now = GetTickCount();
+
+    if (Finding()) {
+        // 이미 찾기 상태에 진입한 경우: 글자 추가 후 검색 갱신
+        if (typeBuf_.size() >= 260) return;
+        typeBuf_ += ch;
+        UpdateFind();
+        return;
+    }
+
+    // 아직 찾기 상태가 아닌 경우:
+    // 첫 키 입력 후 2초가 지났거나 버퍼가 비어있으면 새로 첫 키로 시작
+    if (typeBuf_.empty() || (now - firstCharTick_ > 2000)) {
+        findSavedSelection_ = sel_;
+        findSavedCount_ = selCount_;
+        findSavedFocus_ = focus_;
+        findSavedAnchor_ = anchor_;
+        findSavedScroll_ = scrollY_;
+        typeBuf_.clear();
+        firstCharTick_ = now;
+    }
+
+    if (typeBuf_.size() >= 260) return;
+    typeBuf_ += ch;
+
+    if (typeBuf_.size() >= 2) {
+        // 첫 키 입력 후 2초 이내에 2글자 이상 입력됨 -> 찾기 상태 진입
+        findActive_ = true;
+        UpdateFind();
+    } else {
+        // 키를 한 글자만 입력한 상태:
+        // 해당 키로 시작하는 현재 아이템의 아래쪽으로 가장 가까운 아이템으로 이동
+        int target = FindSingleKey(ItemCount(), focus_, typeBuf_, [&](int i) -> const std::wstring& {
+            return (*items_)[static_cast<size_t>(i)].name;
+        });
+        if (target >= 0) MoveFocus(target, false, false);
     }
 }
 
@@ -774,7 +1084,7 @@ LRESULT FileView::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             if (host_) host_->FvActivate();
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
-        case WM_KILLFOCUS: InvalidateRect(hwnd_, nullptr, FALSE); return 0;
+        case WM_KILLFOCUS: EndFind(false); InvalidateRect(hwnd_, nullptr, FALSE); return 0;
         case WM_VSCROLL: {
             SCROLLINFO si{};
             si.cbSize = sizeof si;
@@ -823,6 +1133,8 @@ LRESULT FileView::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         case WM_RBUTTONDOWN: {
+            if (!Finding()) EndFind(false);
+            if (GET_Y_LPARAM(lParam) >= ch_) return 0;
             SetFocus(hwnd_);
             if (host_) host_->FvActivate();
             int idx = HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));

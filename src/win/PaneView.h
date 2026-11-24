@@ -16,6 +16,7 @@ public:
         std::function<void(PaneView*, FileAction)> action;   // 열기/복사/붙여넣기/삭제/이름 바꾸기
         std::function<void()> modeChanged;                   // 선택 탭 또는 그 보기 모드가 바뀜
         std::function<void()> bookmarksChanged;              // 북마크가 바뀜(두 패널 모두 다시 그림)
+        std::function<void()> searchChanged;                 // 탭의 검색 상태가 바뀜
     };
 
     static bool RegisterWindowClass(HINSTANCE instance);
@@ -35,9 +36,14 @@ public:
     void Restore(const PaneState& state);
     PaneState Capture() const;
 
+    void ExecuteSearch(const TabSearchState& state);
+    void CancelSearch();
+    TabSearchState GetCurrentSearchState() const;
+
     // ---- 상태 ----
     void SetActive(bool active);
     void SetPaneVisible(bool visible);
+    bool HandleFindKey(WPARAM key) { return files_ && files_->HandleFindKey(key); }
     bool IsFileViewFocused() const { return files_ && files_->HasFocus(); }
     void FocusFiles() { if (files_) files_->Focus(); }
     void ApplyDpi();               // DPI·여백 설정 변경 반영
@@ -57,6 +63,7 @@ public:
     void LoadFolderGroup(const FolderGroup& group);
     std::vector<FileEntry> SelectedEntries() const { return files_ ? files_->SelectedEntries() : std::vector<FileEntry>(); }
     std::vector<std::wstring> SelectedPaths() const { return files_ ? files_->SelectedPaths() : std::vector<std::wstring>(); }
+    std::wstring CurrentPath() const { auto tab = SelectedTab(); return tab ? tab->Path() : HomePath(); }
     void SelectAfterRefresh(const std::wstring& name);   // 새로 고친 뒤 항목 선택
     void Dispose();
 
@@ -66,6 +73,7 @@ public:
     void FvOpen() override;
     void FvContextMenu(POINT screen) override;
     void FvSortRequested(SortKey key) override;
+    void FvDropFiles(const std::vector<std::wstring>& paths, const std::wstring& targetDir, bool isMove) override;
 
     // 드롭 대상에서 사용
     bool IsOverBookmarkRow(POINT clientPt) const;

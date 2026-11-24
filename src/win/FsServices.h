@@ -10,6 +10,8 @@ namespace ft {
 // FindFirstFileEx(기본 정보만, 큰 버퍼)로 한 번에 크기·시각·속성을 읽는다. 항목마다 따로 파일을 열지 않는다.
 bool ReadDirectory(const std::wstring& path, std::vector<FileEntry>& out, std::wstring& error,
                    const std::atomic<bool>& cancel);
+bool SearchFiles(const std::wstring& rootPath, const TabSearchState& search, std::vector<FileEntry>& out,
+                 std::wstring& error, const std::atomic<bool>& cancel);
 
 bool PathExists(const std::wstring& path);
 bool IsDirectoryPath(const std::wstring& path);
@@ -36,6 +38,7 @@ private:
 // ---------------- Shell 파일 작업 (IFileOperation) ----------------
 // 전용 STA 스레드에서 실행하고, 끝나면 메인 창에 WM_FT_OPDONE(OpResult*)을 보낸다.
 void RunCopy(std::vector<std::wstring> paths, std::wstring destination, HWND owner);
+void RunMove(std::vector<std::wstring> paths, std::wstring destination, HWND owner);
 void RunDelete(std::vector<std::wstring> paths, HWND owner, bool recycle);
 void RunRename(std::wstring path, std::wstring newName, HWND owner);
 

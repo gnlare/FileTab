@@ -1,0 +1,6 @@
+C:/Dev/3_Tools/FileTab/FileTab-cpp/build/CMakeFiles/filetab_core.dir
+C:/Dev/3_Tools/FileTab/FileTab-cpp/build/CMakeFiles/FileTab.dir
+C:/Dev/3_Tools/FileTab/FileTab-cpp/build/CMakeFiles/core_tests.dir
+C:/Dev/3_Tools/FileTab/FileTab-cpp/build/CMakeFiles/RUN_TESTS.dir
+C:/Dev/3_Tools/FileTab/FileTab-cpp/build/CMakeFiles/ALL_BUILD.dir
+C:/Dev/3_Tools/FileTab/FileTab-cpp/build/CMakeFiles/ZERO_CHECK.dir

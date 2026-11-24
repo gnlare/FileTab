@@ -40,23 +40,23 @@ public:
         if (r == 0) delete this;
         return r;
     }
-    STDMETHODIMP DragEnter(IDataObject* data, DWORD, POINTL pt, DWORD* effect) override {
+    STDMETHODIMP DragEnter(IDataObject* data, DWORD keyState, POINTL, DWORD* effect) override {
         FORMATETC fmt{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
         hasFiles_ = data && SUCCEEDED(data->QueryGetData(&fmt));
-        *effect = Effect(pt);
+        *effect = Effect(keyState);
         return S_OK;
     }
-    STDMETHODIMP DragOver(DWORD, POINTL pt, DWORD* effect) override {
-        *effect = Effect(pt);
+    STDMETHODIMP DragOver(DWORD keyState, POINTL, DWORD* effect) override {
+        *effect = Effect(keyState);
         return S_OK;
     }
     STDMETHODIMP DragLeave() override {
         hasFiles_ = false;
         return S_OK;
     }
-    STDMETHODIMP Drop(IDataObject* data, DWORD, POINTL pt, DWORD* effect) override {
+    STDMETHODIMP Drop(IDataObject* data, DWORD keyState, POINTL pt, DWORD* effect) override {
         *effect = DROPEFFECT_NONE;
-        if (!data || !hasFiles_ || !Over(pt)) return S_OK;
+        if (!data || !hasFiles_) return S_OK;
         FORMATETC fmt{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
         STGMEDIUM medium{};
         if (SUCCEEDED(data->GetData(&fmt, &medium))) {
@@ -74,20 +74,30 @@ public:
                 GlobalUnlock(medium.hGlobal);
             }
             ReleaseStgMedium(&medium);
-            pane_->AddBookmarksFromPaths(paths);
-            *effect = DROPEFFECT_COPY;
+
+            POINT p{pt.x, pt.y};
+            ScreenToClient(pane_->hwnd(), &p);
+            if (pane_->IsOverBookmarkRow(p)) {
+                pane_->AddBookmarksFromPaths(paths);
+                *effect = DROPEFFECT_COPY;
+            } else {
+                std::wstring dest = pane_->CurrentPath();
+                if (!dest.empty() && !paths.empty()) {
+                    if (keyState & MK_SHIFT) RunMove(paths, dest, pane_->hwnd());
+                    else RunCopy(paths, dest, pane_->hwnd());
+                    *effect = (keyState & MK_SHIFT) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+                }
+            }
         }
         hasFiles_ = false;
         return S_OK;
     }
 
 private:
-    bool Over(POINTL pt) const {
-        POINT p{pt.x, pt.y};
-        ScreenToClient(pane_->hwnd(), &p);
-        return pane_->IsOverBookmarkRow(p);
+    DWORD Effect(DWORD keyState) const {
+        if (!hasFiles_) return DROPEFFECT_NONE;
+        return (keyState & MK_SHIFT) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
     }
-    DWORD Effect(POINTL pt) const { return hasFiles_ && Over(pt) ? DROPEFFECT_COPY : DROPEFFECT_NONE; }
 
     PaneView* pane_;
     ULONG refs_ = 1;
@@ -219,6 +229,13 @@ std::shared_ptr<FolderTab> PaneView::SelectedTab() const {
 std::shared_ptr<FolderTab> PaneView::MakeTab(const std::wstring& path, ViewMode mode) {
     auto tab = std::make_shared<FolderTab>(path, mode);
     tab->SetListener([this](FolderTab& t, unsigned what) { OnTabChanged(t, what); });
+    tab->SetStateProvider([this, weak = std::weak_ptr<FolderTab>(tab)](FolderViewState& out) {
+        auto sel = SelectedTab();
+        auto sp = weak.lock();
+        if (files_ && sel && sp && sel == sp) {
+            files_->GetViewState(out);
+        }
+    });
     return tab;
 }
 
@@ -270,6 +287,7 @@ void PaneView::SelectTab(int index, bool force) {
     StartWatcher();
     tab->Refresh();   // 이미 표시 중인 목록은 그대로 두고, 바뀐 경우에만 조용히 갱신된다
     if (cb.modeChanged) cb.modeChanged();
+    if (cb.searchChanged) cb.searchChanged();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -300,6 +318,19 @@ PaneState PaneView::Capture() const {
     return state;
 }
 
+void PaneView::ExecuteSearch(const TabSearchState& state) {
+    if (auto t = SelectedTab()) t->ExecuteSearch(state);
+}
+
+void PaneView::CancelSearch() {
+    if (auto t = SelectedTab()) t->CancelSearch();
+}
+
+TabSearchState PaneView::GetCurrentSearchState() const {
+    if (auto t = SelectedTab()) return t->GetSearchState();
+    return {};
+}
+
 void PaneView::OnTabChanged(FolderTab& tab, unsigned what) {
     if (disposed_) return;
     auto sel = SelectedTab();
@@ -310,6 +341,7 @@ void PaneView::OnTabChanged(FolderTab& tab, unsigned what) {
         if (what & kChangePath) {
             crumbsDirty_ = true;
             if (!EqualsNoCase(watchedPath_, tab.Path())) StartWatcher();
+            if (cb.searchChanged) cb.searchChanged();
         }
         if ((what & kChangeMode) && cb.modeChanged) cb.modeChanged();
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -400,8 +432,7 @@ void PaneView::NavigateSelected(const std::wstring& target) {
 void PaneView::Up() {
     auto t = SelectedTab();
     if (!t) return;
-    std::wstring parent = path::Parent(t->Path());
-    if (!parent.empty()) t->Navigate(parent);
+    t->Up();
 }
 
 void PaneView::ReportOpenFailure(const std::wstring& target) {
@@ -710,6 +741,15 @@ void PaneView::FvSortRequested(SortKey key) {
     // 같은 열을 오름차순으로 보고 있을 때만 내림차순으로 바꾼다(WPF 버전과 같은 규칙)
     bool desc = tab->SortColumn() == key && !tab->SortDescending();
     tab->Sort(key, desc);
+}
+
+void PaneView::FvDropFiles(const std::vector<std::wstring>& paths, const std::wstring& targetDir, bool isMove) {
+    if (paths.empty() || targetDir.empty()) return;
+    if (isMove) {
+        RunMove(paths, targetDir, hwnd_);
+    } else {
+        RunCopy(paths, targetDir, hwnd_);
+    }
 }
 
 }  // namespace ft

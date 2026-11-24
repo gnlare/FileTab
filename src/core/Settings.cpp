@@ -214,11 +214,12 @@ std::vector<ShortcutItem> DefaultShortcuts() {
         {"dual_pane",   L"좌우 분할 / 단일 창 전환", L"F6"},
         {"new_tab",     L"새 탭",                    L"Ctrl+T"},
         {"close_tab",   L"탭 닫기",                  L"Ctrl+W"},
-        {"address",     L"주소창 입력",              L"Ctrl+L"},
+        {"address",     L"주소창 입력",              L"F4"},
         {"parent",      L"상위 폴더",                L"Alt+Up", L"Backspace"},
         {"back",        L"뒤로 이동",                L"Alt+Left"},
         {"forward",     L"앞으로 이동",              L"Alt+Right"},
-        {"bookmark",    L"현재 폴더 북마크",          L"Ctrl+D"}
+        {"bookmark",    L"현재 폴더 북마크",          L"Ctrl+D"},
+        {"find",        L"찾기",                     L"Ctrl+F"}
     };
 }
 
