@@ -1,0 +1,24 @@
+#include <winuser.h>
+#include "resource.h"
+
+IDI_APPICON ICON "app.ico"
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
+
+1 VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "041204B0"
+    BEGIN
+      VALUE "FileDescription", "FileTab"
+      VALUE "ProductName", "FileTab"
+      VALUE "FileVersion", "1.0.0.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0412, 1200
+  END
+END
